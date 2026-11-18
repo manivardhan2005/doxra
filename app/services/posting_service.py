@@ -50,10 +50,11 @@ class PostingService:
         cta_url = validate_posting_message(message)
 
         logger.info(
-            "Initiating broadcast across %d platforms for message: '%s...' (CTA: %s)",
+            "Initiating broadcast across %d platforms for message: '%s...' (CTA: %s, Mock: %s)",
             len(self.platforms),
             message[:40],
             cta_url,
+            self.settings.mock_mode,
         )
 
         # Launch concurrent async tasks for all platforms
@@ -74,6 +75,7 @@ class PostingService:
                     PlatformResult(
                         platform=platform_name,
                         status="failed",
+                        is_mock=False,
                         posted_url=None,
                         public_access=False,
                         date=None,
@@ -89,6 +91,7 @@ class PostingService:
                     PlatformResult(
                         platform=platform_name,
                         status="failed",
+                        is_mock=False,
                         posted_url=None,
                         public_access=False,
                         date=None,
@@ -97,13 +100,13 @@ class PostingService:
                     )
                 )
 
-        # Calculate metrics
-        successful_count = sum(1 for r in final_results if r.status == "success")
+        # Calculate metrics: 'success' and 'simulated' are counted towards successful execution
+        successful_count = sum(1 for r in final_results if r.status in ("success", "simulated"))
         failed_count = sum(1 for r in final_results if r.status == "failed")
         overall_success = successful_count > 0
 
         logger.info(
-            "Broadcast finished: %d succeeded, %d failed out of %d total platforms",
+            "Broadcast finished: %d succeeded/simulated, %d failed out of %d total platforms",
             successful_count,
             failed_count,
             len(final_results),
@@ -111,6 +114,7 @@ class PostingService:
 
         return PostingResponse(
             success=overall_success,
+            mock_mode=self.settings.mock_mode,
             total_platforms=len(final_results),
             successful_posts=successful_count,
             failed_posts=failed_count,

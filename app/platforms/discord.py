@@ -1,7 +1,7 @@
 """Discord Webhook API integration adapter."""
 
 import logging
-import random
+from typing import Optional
 import httpx
 
 from app.config import Settings
@@ -28,15 +28,20 @@ class DiscordPlatform(BasePlatform):
     def is_configured(self) -> bool:
         return bool(self.webhook_url and self.webhook_url.startswith("https://discord.com/api/webhooks/"))
 
+    def mock_post(self, message: str, cta_url: str) -> PlatformResult:
+        """Simulate posting when MOCK_MODE=True without fabricating live URLs."""
+        simulated_preview = "https://discord.com/channels/mock_guild/mock_channel/simulated_post"
+        logger.info("Discord: Executed in simulated mock mode.")
+        return self.mock_result(simulated_preview, public_access=True)
+
     async def post(self, message: str, cta_url: str) -> PlatformResult:
         """Publish message via Discord Webhook."""
-        if self.settings.mock_mode or not self.is_configured():
-            msg_id = random.randint(100000000000000000, 999999999999999999)
-            channel_id = 112233445566778899
-            guild_id = 998877665544332211
-            simulated_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{msg_id}"
-            logger.info("Discord: Published via simulation mode -> %s", simulated_url)
-            return self.success_result(simulated_url)
+        if self.settings.mock_mode:
+            return self.mock_post(message, cta_url)
+
+        if not self.is_configured():
+            logger.warning("Discord webhook URL is not configured.")
+            return self.failure_result("Discord webhook URL is not configured (DISCORD_WEBHOOK_URL required)")
 
         # Append wait=true so Discord returns the full message JSON payload
         delimiter = "&" if "?" in self.webhook_url else "?"
@@ -53,15 +58,28 @@ class DiscordPlatform(BasePlatform):
 
             if response.status_code in (200, 204):
                 data = response.json() if response.content else {}
-                msg_id = data.get("id", random.randint(100000000000000000, 999999999999999999))
-                channel_id = data.get("channel_id", "channel")
-                posted_url = f"https://discord.com/channels/@me/{channel_id}/{msg_id}"
-                return self.success_result(posted_url)
+                msg_id = data.get("id")
+                channel_id = data.get("channel_id")
+
+                # Derive URL ONLY if real message ID and channel ID were returned by Discord
+                posted_url: Optional[str] = None
+                if msg_id and channel_id:
+                    posted_url = f"https://discord.com/channels/@me/{channel_id}/{msg_id}"
+
+                return self.success_result(posted_url=posted_url, public_access=True)
+
+            elif response.status_code == 429:
+                return self.failure_result("HTTP 429: Discord rate limit exceeded")
+            elif response.status_code in (401, 404):
+                return self.failure_result(f"HTTP {response.status_code}: Invalid or revoked Discord webhook URL")
             else:
                 error_detail = response.text
                 logger.error("Discord Webhook error: %s (status %d)", error_detail, response.status_code)
                 return self.failure_result(f"HTTP {response.status_code}: {error_detail}")
 
+        except httpx.TimeoutException:
+            logger.error("Discord API request timed out.")
+            return self.failure_result("Request timeout to Discord Webhook gateway")
         except httpx.RequestError as exc:
             logger.error("Discord connection error: %s", exc)
             return self.failure_result(f"Network error: {str(exc)}")

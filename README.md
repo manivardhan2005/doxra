@@ -4,9 +4,9 @@
 [![Python](https://img.shields.io/badge/Python-3.10%20|%203.11%20|%203.12%20|%203.13-blue.svg)](https://www.python.org/)
 [![Pydantic](https://img.shields.io/badge/Pydantic-v2.5+-E92063.svg)](https://docs.pydantic.dev/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-12%20Passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-19%20Passing-brightgreen.svg)]()
 
-A high-performance, asynchronous REST API service built with **Python 3.x** and **FastAPI** that automatically publishes short promotional and marketing messages across multiple third-party social media platforms, communication channels, and web portals concurrently with complete fault isolation and enterprise-grade input validation.
+A high-performance, asynchronous REST API service built with **Python 3.x** and **FastAPI** that automatically publishes short promotional and marketing messages across multiple third-party social media platforms, communication channels, and web portals concurrently with complete fault isolation, enterprise-grade input validation, and SSRF defense.
 
 ---
 
@@ -14,17 +14,20 @@ A high-performance, asynchronous REST API service built with **Python 3.x** and 
 
 1. [Objective & Architecture](#objective--architecture)
 2. [Supported Platforms & API Research](#supported-platforms--api-research)
-3. [Input Validation & Security Rules](#input-validation--security-rules)
-4. [Project Structure](#project-structure)
-5. [Installation & Setup](#installation--setup)
-6. [API Specification](#api-specification)
+3. [Authentication & Realistic Permalink Handling](#authentication--realistic-permalink-handling)
+4. [Input Validation & Advanced SSRF Hardening](#input-validation--advanced-ssrf-hardening)
+5. [Mock Mode vs Production Mode](#mock-mode-vs-production-mode)
+6. [Project Structure](#project-structure)
+7. [Installation & Setup](#installation--setup)
+8. [API Specification](#api-specification)
    - [Endpoint Details](#endpoint-details)
    - [Sample Request](#sample-request)
-   - [Sample Success Response](#sample-success-response)
+   - [Sample Simulated Response (Mock Mode)](#sample-simulated-response-mock-mode)
+   - [Sample Live Production Response](#sample-live-production-response)
    - [Sample Validation Error Response](#sample-validation-error-response)
-7. [Testing & Verification](#testing--verification)
-8. [Configuration & Environment Variables](#configuration--environment-variables)
-9. [Submission & Verification Checklist](#submission--verification-checklist)
+9. [Automated Test Suite (19 Tests)](#automated-test-suite-19-tests)
+10. [Configuration & Environment Variables](#configuration--environment-variables)
+11. [Submission & Verification Checklist](#submission--verification-checklist)
 
 ---
 
@@ -36,7 +39,7 @@ Modern digital distribution requires organizations to broadcast updates, announc
 2. **Internal Platform Selection**: Intelligently routes messages across 6 independent platform adapters without requiring caller platform orchestration.
 3. **Concurrent Async Execution**: Leverages Python's `asyncio` and `httpx` asynchronous HTTP clients to dispatch requests concurrently via `asyncio.gather(..., return_exceptions=True)`.
 4. **Fault Isolation**: Ensures failures on one platform (e.g. invalid tokens, rate limits, network timeouts) never compromise or delay broadcasts to remaining platforms.
-5. **Standardized Audit Results**: Returns structured JSON detailing individual platform statuses, direct published URLs, public visibility status, and UTC timestamps.
+5. **Accurate Audit Results**: Returns structured JSON with explicit status distinctions (`simulated` vs `success` vs `failed`), real published URLs where supported by API responses, and UTC timestamps.
 
 ### High-Level Architecture Flow
 
@@ -50,8 +53,8 @@ Modern digital distribution requires organizations to broadcast updates, announc
 |                          Input Validation Layer                         |
 |  - Max 200 characters limit check                                       |
 |  - Exactly 1 CTA link check (Regex & RFC parser)                        |
-|  - URL syntax & domain format validation                                |
-|  - SSRF protection (Blocks localhost, private subnets, cloud metadata)  |
+|  - Embedded credential (userinfo) check                                 |
+|  - SSRF protection (IPv4, IPv6, IPv4-mapped, integer IPs, DNS check)    |
 +-------------------------------------------------------------------------+
                                     |
                                     v
@@ -75,50 +78,77 @@ The system integrates with **6 major third-party platforms** (exceeding the assi
 
 | # | Platform | Official API Integration | Auth Method | Public Access | Official Documentation Reference |
 |---|---|---|---|---|---|
-| 1 | **Telegram** | `POST https://api.telegram.org/bot<token>/sendMessage` | Bot Token (`BotFather`) | **Yes** (Public Channel) | [Telegram Bot API Docs](https://core.telegram.org/bots/api#sendmessage) |
+| 1 | **Telegram** | `POST https://api.telegram.org/bot<token>/sendMessage` | Bot Token (`BotFather`) | **Yes** (Public Channel) / **No** (Private Group) | [Telegram Bot API Docs](https://core.telegram.org/bots/api#sendmessage) |
 | 2 | **Discord** | `POST https://discord.com/api/webhooks/<id>/<token>?wait=true` | Webhook URL Token | **Yes** (Public Server) | [Discord Webhooks Reference](https://discord.com/developers/docs/resources/webhook) |
-| 3 | **Slack** | `POST https://hooks.slack.com/services/...` | Incoming Webhook Secret | **No** (Workspace Private) | [Slack Incoming Webhooks](https://api.slack.com/messaging/webhooks) |
-| 4 | **X (Twitter)** | `POST https://api.twitter.com/2/tweets` | OAuth 2.0 / Bearer Token | **Yes** (Public Tweet) | [X API v2 Post Tweets](https://developer.x.com/en/docs/twitter-api/tweets/manage-tweets/api-reference/post-tweets) |
+| 3 | **Slack** | `POST https://hooks.slack.com/services/...` | Incoming Webhook Secret | **No** (Workspace Internal) | [Slack Incoming Webhooks](https://api.slack.com/messaging/webhooks) |
+| 4 | **X (Twitter)** | `POST https://api.twitter.com/2/tweets` | OAuth 1.0a User Context / OAuth 2.0 User Token | **Yes** (Public Tweet) | [X API v2 Post Tweets](https://developer.x.com/en/docs/twitter-api/tweets/manage-tweets/api-reference/post-tweets) |
 | 5 | **Mastodon** | `POST {instance}/api/v1/statuses` | Bearer Access Token | **Yes** (Federated Public) | [Mastodon Statuses API](https://docs.joinmastodon.org/methods/statuses/#create) |
 | 6 | **LinkedIn** | `POST https://api.linkedin.com/v2/ugcPosts` | OAuth 2.0 Bearer Token | **Yes** (Public Post) | [LinkedIn Consumer Share API](https://learn.microsoft.com/en-us/linkedin/consumer/integrations/self-serve/share-on-linkedin) |
 
 ---
 
-## Input Validation & Security Rules
+## Authentication & Realistic Permalink Handling
 
-To ensure reliable operation and adhere to the practical test criteria, the application implements strict domain validators:
+### 1. X (Twitter) User-Context Authentication
+X API v2 `/2/tweets` requires **User-Context** authorization (an app-only Bearer token is rejected by X for tweet creation). The adapter implements:
+- **OAuth 1.0a User Context (RFC 5849)**: Generates HMAC-SHA1 signatures using Consumer Key, Consumer Secret, Access Token, and Access Token Secret.
+- **OAuth 2.0 User Token**: Supports user tokens created with the `tweet.write` scope.
+
+### 2. Honest Permalink Generation (No Fabricated IDs)
+- **Slack**: Incoming Webhooks return `"ok"` to indicate successful broadcast, but do not provide public permalinks. The adapter honestly sets `posted_url: null` and `public_access: false` instead of fabricating fake timestamp URLs.
+- **Discord**: Uses `?wait=true` to capture Discord's message object (`id`, `channel_id`). Only sets `posted_url` if the IDs are returned in Discord's actual response.
+- **Telegram**: Distinguishes public channel usernames (`@channel` $\rightarrow$ `https://t.me/channel/{id}`) from private numeric chat IDs (`-100...` $\rightarrow$ `public_access: false`).
+- **LinkedIn**: Extracts the actual share URN (`urn:li:share:{id}`) returned by the UGC API without fabricating random IDs.
+
+---
+
+## Input Validation & Advanced SSRF Hardening
 
 1. **Character Constraint**: The entire message payload must not exceed **200 characters** (`len(message) <= 200`).
-2. **Single CTA Link**:
-   - Exactly **one** valid HTTP/HTTPS URL must be included in the message.
-   - Messages with 0 links return a `422 Unprocessable Entity` error.
-   - Messages with 2 or more links return a `422 Unprocessable Entity` error.
-3. **URL Scheme & Structure**: The CTA link must strictly use `http` or `https` and possess a valid domain name.
-4. **SSRF (Server-Side Request Forgery) Protection**:
-   - Prohibits target links pointing to `localhost`, `127.0.0.1`, `0.0.0.0`, or `::1`.
-   - Prohibits private RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
-   - Prohibits cloud instance metadata addresses (`169.254.169.254`, `metadata.google.internal`).
+2. **Single CTA Link**: Exactly **one** valid HTTP/HTTPS URL must be included in the message. Zero or multiple links are rejected with HTTP 422.
+3. **URL Credentials**: Embedded credentials (`http://user:pass@host`) are strictly prohibited to prevent credential leakage.
+4. **Comprehensive SSRF Defense**:
+   - Blocks loopback addresses: `localhost`, `127.0.0.1`, `::1`.
+   - Blocks IPv6 loopback (`::1`), link-local (`fe80::/10`), and IPv4-mapped IPv6 (`::ffff:127.0.0.1`).
+   - Blocks alternative integer IP representations (e.g. `2130706433` resolving to `127.0.0.1`).
+   - Blocks private RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
+   - Blocks cloud instance metadata endpoints (`169.254.169.254`, `metadata.google.internal`).
+   - **DNS Resolution Check**: Resolves hostnames via `socket.getaddrinfo` to catch DNS rebinding and domains resolving to internal IP addresses.
+
+---
+
+## Mock Mode vs Production Mode
+
+To support evaluation without requiring live API keys for all 6 platforms, the system provides an explicit mode distinction:
+
+- **Mock Mode (`MOCK_MODE=true`)**:
+  - Automatically simulates posting for quick evaluation.
+  - Returns `status: "simulated"` and `is_mock: true`.
+  - Preview URLs are explicitly identified as simulated previews.
+- **Production Mode (`MOCK_MODE=false`)**:
+  - Unconfigured platforms return `status: "failed"` with `"Platform credentials are not configured"`.
+  - Configured platforms make live, authenticated HTTP REST API calls.
 
 ---
 
 ## Project Structure
 
 ```text
-automated-posting/
+doxra/
 │
 ├── app/
 │   ├── __init__.py               # Application package marker
 │   ├── main.py                   # FastAPI initialization, routing & exception handlers
-│   ├── schemas.py                # Pydantic models for request, response, and platform results
+│   ├── schemas.py                # Pydantic models with explicit mock status flags
 │   ├── config.py                 # Environment settings & configuration singleton
 │   │
 │   ├── platforms/                # Modular platform adapters
 │   │   ├── __init__.py           # Platform registry & exports
-│   │   ├── base.py               # Abstract BasePlatform with shared contracts
+│   │   ├── base.py               # Abstract BasePlatform with success, mock & failure helpers
 │   │   ├── telegram.py           # Telegram Bot API implementation
 │   │   ├── discord.py            # Discord Webhook API implementation
 │   │   ├── slack.py              # Slack Incoming Webhook implementation
-│   │   ├── twitter.py            # X (Twitter) API v2 implementation
+│   │   ├── twitter.py            # X (Twitter) API v2 with OAuth 1.0a / OAuth 2.0 user context
 │   │   ├── mastodon.py           # Mastodon REST API implementation
 │   │   └── linkedin.py           # LinkedIn UGC Posts API implementation
 │   │
@@ -128,11 +158,11 @@ automated-posting/
 │   │
 │   └── utils/
 │       ├── __init__.py           # Utility exports
-│       └── validators.py         # URL extraction, CTA validation & SSRF security
+│       └── validators.py         # CTA extraction, URL validator & hardened SSRF defense
 │
 ├── tests/
 │   ├── __init__.py               # Test package marker
-│   └── test_posting.py           # 12 comprehensive unit & integration tests
+│   └── test_posting.py           # 19 comprehensive unit & integration tests
 │
 ├── .env.example                  # Environment configuration template
 ├── .env                          # Local environment variables
@@ -151,8 +181,8 @@ automated-posting/
 
 ### 2. Clone the Repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/automated-multi-platform-poster.git
-cd automated-multi-platform-poster
+git clone https://github.com/manivardhan2005/doxra.git
+cd doxra
 ```
 
 ### 3. Create and Activate a Virtual Environment
@@ -176,10 +206,6 @@ Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
-
-> **Note on Mock Mode**:  
-> By default, `MOCK_MODE=true` is enabled in `.env`. This allows the technical review team to test and execute the application immediately out of the box without requiring private API tokens for all 6 platforms.  
-> When ready for production, configure your live platform credentials and set `MOCK_MODE=false`.
 
 ### 6. Start the FastAPI Local Server
 Run the application using Uvicorn on port **4000**:
@@ -217,68 +243,113 @@ curl -X POST "http://localhost:4000/posting" \
 
 ---
 
-### Sample Success Response (`HTTP 200 OK`)
+### Sample Simulated Response (Mock Mode)
 
 ```json
 {
   "success": true,
+  "mock_mode": true,
   "total_platforms": 6,
   "successful_posts": 6,
   "failed_posts": 0,
   "results": [
     {
       "platform": "Telegram",
-      "status": "success",
-      "posted_url": "https://t.me/dxoratech/23845",
+      "status": "simulated",
+      "is_mock": true,
+      "posted_url": "https://t.me/dxoratech_preview/simulated-post",
       "public_access": true,
       "date": "2026-11-18",
-      "time": "06:12:04",
+      "time": "06:30:00",
       "error": null
     },
     {
       "platform": "Discord",
-      "status": "success",
-      "posted_url": "https://discord.com/channels/998877665544332211/112233445566778899/407822684746058361",
+      "status": "simulated",
+      "is_mock": true,
+      "posted_url": "https://discord.com/channels/mock_guild/mock_channel/simulated_post",
       "public_access": true,
       "date": "2026-11-18",
-      "time": "06:12:04",
+      "time": "06:30:00",
       "error": null
     },
     {
       "platform": "Slack",
-      "status": "success",
-      "posted_url": "https://app.slack.com/client/T01234567/C09876543/thread/1794982324.954000",
+      "status": "simulated",
+      "is_mock": true,
+      "posted_url": "https://app.slack.com/client/mock_workspace/mock_channel",
       "public_access": false,
       "date": "2026-11-18",
-      "time": "06:12:04",
+      "time": "06:30:00",
       "error": null
     },
     {
       "platform": "X (Twitter)",
-      "status": "success",
-      "posted_url": "https://x.com/dxoratech/status/1810831393448961388",
+      "status": "simulated",
+      "is_mock": true,
+      "posted_url": "https://x.com/dxoratech/status/simulated_tweet",
       "public_access": true,
       "date": "2026-11-18",
-      "time": "06:12:04",
+      "time": "06:30:00",
       "error": null
     },
     {
       "platform": "Mastodon",
-      "status": "success",
-      "posted_url": "https://mastodon.social/@dxora/112197850334108768",
+      "status": "simulated",
+      "is_mock": true,
+      "posted_url": "https://mastodon.social/@dxora/simulated_status",
       "public_access": true,
       "date": "2026-11-18",
-      "time": "06:12:04",
+      "time": "06:30:00",
       "error": null
     },
     {
       "platform": "LinkedIn",
-      "status": "success",
-      "posted_url": "https://www.linkedin.com/feed/update/urn:li:share:7151541026161385658",
+      "status": "simulated",
+      "is_mock": true,
+      "posted_url": "https://www.linkedin.com/feed/update/urn:li:share:simulated_share",
       "public_access": true,
       "date": "2026-11-18",
-      "time": "06:12:04",
+      "time": "06:30:00",
       "error": null
+    }
+  ]
+}
+```
+
+---
+
+### Sample Live Production Response (Unconfigured Platform Isolation)
+
+When `MOCK_MODE=false` and credentials are not provided:
+
+```json
+{
+  "success": false,
+  "mock_mode": false,
+  "total_platforms": 6,
+  "successful_posts": 0,
+  "failed_posts": 6,
+  "results": [
+    {
+      "platform": "Telegram",
+      "status": "failed",
+      "is_mock": false,
+      "posted_url": null,
+      "public_access": false,
+      "date": null,
+      "time": null,
+      "error": "Telegram credentials not configured (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID required)"
+    },
+    {
+      "platform": "Slack",
+      "status": "failed",
+      "is_mock": false,
+      "posted_url": null,
+      "public_access": false,
+      "date": null,
+      "time": null,
+      "error": "Slack webhook URL is not configured (SLACK_WEBHOOK_URL required)"
     }
   ]
 }
@@ -320,9 +391,9 @@ curl -X POST "http://localhost:4000/posting" \
 
 ---
 
-## Testing & Verification
+## Automated Test Suite (19 Tests)
 
-The project includes an automated test suite with **12 comprehensive tests** covering input validation, URL security, fault isolation, and API responses.
+The test suite contains **19 comprehensive tests** covering input validation, URL security, mock/production mode boundaries, rate limiting, and fault isolation:
 
 ### Running Tests
 Execute `pytest` from the root directory:
@@ -330,27 +401,34 @@ Execute `pytest` from the root directory:
 pytest tests/ -v
 ```
 
-### Test Suite Output
+### Test Suite Execution Summary
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.13.4, pytest-9.1.1, pluggy-1.6.0
-rootdir: C:\...\automated-posting
-collected 12 items
+rootdir: C:\...\doxra
+collected 19 items
 
-tests/test_posting.py::test_root_endpoint PASSED                         [  8%]
-tests/test_posting.py::test_health_check_endpoint PASSED                 [ 16%]
-tests/test_posting.py::test_openapi_schema_endpoint PASSED               [ 25%]
-tests/test_posting.py::test_successful_multi_platform_posting PASSED     [ 33%]
-tests/test_posting.py::test_validation_error_message_too_long PASSED     [ 41%]
-tests/test_posting.py::test_validation_error_missing_cta_link PASSED     [ 50%]
-tests/test_posting.py::test_validation_error_multiple_cta_links PASSED   [ 58%]
-tests/test_posting.py::test_validation_error_invalid_url_scheme PASSED   [ 66%]
-tests/test_posting.py::test_validation_error_ssrf_localhost PASSED       [ 75%]
-tests/test_posting.py::test_validation_error_ssrf_private_ip PASSED      [ 83%]
-tests/test_posting.py::test_platform_failure_isolation PASSED            [ 91%]
+tests/test_posting.py::test_root_endpoint PASSED                         [  5%]
+tests/test_posting.py::test_health_check_endpoint PASSED                 [ 10%]
+tests/test_posting.py::test_openapi_schema_endpoint PASSED               [ 15%]
+tests/test_posting.py::test_mock_mode_explicitly_identifies_simulated_results PASSED [ 21%]
+tests/test_posting.py::test_mock_mode_disabled_missing_credentials_fails PASSED [ 26%]
+tests/test_posting.py::test_validation_error_message_too_long PASSED     [ 31%]
+tests/test_posting.py::test_validation_error_missing_cta_link PASSED     [ 36%]
+tests/test_posting.py::test_validation_error_multiple_cta_links PASSED   [ 42%]
+tests/test_posting.py::test_validation_error_invalid_url_scheme PASSED   [ 47%]
+tests/test_posting.py::test_validation_error_url_credentials_prohibited PASSED [ 52%]
+tests/test_posting.py::test_validation_error_ssrf_localhost PASSED       [ 57%]
+tests/test_posting.py::test_validation_error_ssrf_private_ip PASSED      [ 63%]
+tests/test_posting.py::test_validation_error_ssrf_ipv6_loopback_and_linklocal PASSED [ 68%]
+tests/test_posting.py::test_validation_error_dns_resolves_to_private_ip PASSED [ 73%]
+tests/test_posting.py::test_platform_failure_isolation PASSED            [ 78%]
+tests/test_posting.py::test_platform_rate_limit_429_captured PASSED      [ 84%]
+tests/test_posting.py::test_platform_timeout_captured PASSED             [ 89%]
+tests/test_posting.py::test_successful_response_without_post_id_does_not_fabricate_url PASSED [ 94%]
 tests/test_posting.py::test_all_platforms_failure_handling PASSED        [100%]
 
-======================= 12 passed in 0.77s ========================
+======================= 19 passed in 0.46s ========================
 ```
 
 ---
@@ -367,10 +445,14 @@ tests/test_posting.py::test_all_platforms_failure_handling PASSED        [100%]
 | `TELEGRAM_CHAT_ID` | string | `None` | Channel or group chat ID |
 | `DISCORD_WEBHOOK_URL` | string | `None` | Discord webhook URL |
 | `SLACK_WEBHOOK_URL` | string | `None` | Slack incoming webhook URL |
-| `TWITTER_BEARER_TOKEN` | string | `None` | Twitter API v2 Bearer Token |
+| `TWITTER_API_KEY` | string | `None` | X (Twitter) Consumer API Key |
+| `TWITTER_API_SECRET` | string | `None` | X (Twitter) Consumer API Secret |
+| `TWITTER_ACCESS_TOKEN` | string | `None` | X (Twitter) OAuth 1.0a / OAuth 2.0 User Access Token |
+| `TWITTER_ACCESS_TOKEN_SECRET` | string | `None` | X (Twitter) OAuth 1.0a Access Token Secret |
 | `MASTODON_INSTANCE_URL` | string | `https://mastodon.social` | Mastodon instance domain |
 | `MASTODON_ACCESS_TOKEN` | string | `None` | Mastodon OAuth access token |
 | `LINKEDIN_ACCESS_TOKEN` | string | `None` | LinkedIn Developer OAuth Bearer Token |
+| `LINKEDIN_AUTHOR_URN` | string | `urn:li:organization:...` | LinkedIn Author URN |
 
 ---
 
@@ -378,18 +460,20 @@ tests/test_posting.py::test_all_platforms_failure_handling PASSED        [100%]
 
 - [x] Python 3.x with FastAPI and Uvicorn
 - [x] Input validation ($\le 200$ characters, exactly 1 CTA link)
-- [x] SSRF protection against private IP and loopback addresses
+- [x] Hardened SSRF defense (IPv4/IPv6, integer IPs, user credentials, DNS check)
 - [x] 6 independent platform integrations (Telegram, Discord, Slack, X, Mastodon, LinkedIn)
+- [x] X (Twitter) user-context authentication (OAuth 1.0a & OAuth 2.0)
+- [x] Honest permalink generation without fabricating fake message IDs
+- [x] Explicit mock mode (`is_mock: true`, `status: "simulated"`) vs production mode
 - [x] Concurrency with fault isolation (single platform failure does not block others)
-- [x] Returns structured results matching the specification schema
 - [x] Server runs at `http://localhost:4000` with interactive docs at `/docs`
-- [x] 12 unit and integration tests passing (`pytest tests/ -v`)
+- [x] 19 unit and integration tests passing (`pytest tests/ -v`)
 - [x] Clean repository without API keys, passwords, or private credentials
-- [x] Public GitHub repository ready for submission
+- [x] Public GitHub repository ready for submission: [https://github.com/manivardhan2005/doxra](https://github.com/manivardhan2005/doxra)
 
 ### Email Submission Details
 - **To**: [hr@chivoxai.com](mailto:hr@chivoxai.com)
-- **Subject**: `[Your Name] - Python Practical test review`
+- **Subject**: `Mani Vardhan - Python Practical test review`
 - **Required Info**: Full Name, Public GitHub Repository Link, Contact Number, Current Location, Preferred Date and Time for Final Discussion.
 - **Verification Links**:
   - Dxora Technologies LinkedIn: [https://www.linkedin.com/company/dxora-technologies](https://www.linkedin.com/company/dxora-technologies)
